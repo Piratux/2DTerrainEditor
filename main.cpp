@@ -26,10 +26,11 @@
 #define _USE_MATH_DEFINES
 #include <math.h>
 
+#include <queue>
+
 template <typename T>
 class BlockBuffer{
 	std::vector<T> buffer;
-	std::vector<char> access_buffer;
 	int x_offset;
 	int y_offset;
 	int x_size;
@@ -43,9 +44,7 @@ public:
 		x_size = to.x - from.x + 1;
 		y_size = to.y - from.y + 1;
 		buffer.resize(x_size * y_size);
-		access_buffer.resize(x_size * y_size);
-		std::fill(buffer.begin(), buffer.end(), T());
-		std::fill(access_buffer.begin(), access_buffer.end(), 0);
+		std::fill(buffer.begin(), buffer.end(), T()));
 	}
 
 	int get_index(int x, int y){
@@ -54,13 +53,9 @@ public:
 	void set(int x, int y, T value){
 		int index = get_index(x, y);
 		buffer[index] = value;
-		access_buffer[index] = 1;
 	}
 	T get(int x, int y){
 		return buffer[get_index(x, y)];
-	}
-	bool contains(int x, int y){
-		return (bool)access_buffer[get_index(x, y)];
 	}
 };
 
@@ -86,10 +81,12 @@ public:
 
 	olc::Sprite map{map_size.x, map_size.y};
 
+	int blend_range = 15;
+
 	int brush_size = 16;
 	float brush_size_f = brush_size;
 	float brush_size_min = 4.0f;
-	float brush_size_max = 100.0f;
+	float brush_size_max = 200.0f;
 	float brush_size_multiplier = 1.1f;
 
 	float speed = 100.0f;
@@ -202,6 +199,7 @@ public:
 		bool raycast_hit = RaycastPixelTarget(ray_start_pos, ray_dir, max_distance, intersection_result);
 
 		if (raycast_hit) {
+			// Right mouse button
 			if (GetKey(olc::Key::CTRL).bHeld && GetMouse(1).bPressed || !GetKey(olc::Key::CTRL).bHeld && GetMouse(1).bHeld) {
 				if (can_edit_terrain) {
 					can_edit_terrain = false;
@@ -218,16 +216,18 @@ public:
 						DestructTerrain_GaussFractional(intersection_result, ray_dir);
 						break;
 					case EditMode::AdjustTerrain_BlendBallFull:
-						AdjustTerrain_BlendBallFull(intersection_result, ray_dir);
+						AdjustTerrain_BlendBallFractional(intersection_result, ray_dir);
 						break;
 					case EditMode::AdjustTerrain_BlendBallFractional:
-						AdjustTerrain_BlendBallFractional(intersection_result, ray_dir);
+						AdjustTerrain_BlendBallFractionalFast2();
 						break;
 					default:
 						std::cout << "Error\n";
 					}
 				}
 			}
+
+			// Left mouse button
 			else if (GetKey(olc::Key::CTRL).bHeld && GetMouse(0).bPressed || !GetKey(olc::Key::CTRL).bHeld && GetMouse(0).bHeld) {
 				if (can_edit_terrain) {
 					can_edit_terrain = false;
@@ -244,7 +244,7 @@ public:
 						RestoreTerrain_GaussFractional(intersection_result, ray_dir);
 						break;
 					case EditMode::AdjustTerrain_BlendBallFull:
-						AdjustTerrain_BlendBallFull(intersection_result, ray_dir);
+						AdjustTerrain_BlendBallFractional(intersection_result, ray_dir);
 						break;
 					case EditMode::AdjustTerrain_BlendBallFractional:
 						AdjustTerrain_BlendBallFractional(intersection_result, ray_dir);
@@ -522,90 +522,92 @@ public:
 		SetDrawTarget(previous_target);
 	}
 
-	void AdjustTerrain_BlendBallFull(olc::vf2d vCell, olc::vf2d direction){
-        double brush_size_squared = brush_size * brush_size;
-        // all changes are initially performed into a buffer to prevent the
-        // results bleeding into each other
+	// void AdjustTerrain_BlendBallFull(olc::vf2d vCell, olc::vf2d direction){
+    //     double brush_size_squared = brush_size * brush_size;
+    //     // all changes are initially performed into a buffer to prevent the
+    //     // results bleeding into each other
 
-		BlockBuffer<int> buffer{{-brush_size, -brush_size}, {brush_size, brush_size}};
+	// 	BlockBuffer<int> buffer{{-brush_size, -brush_size}, {brush_size, brush_size}};
 
-		olc::vf2d ray_start_pos = player_pos;
-		olc::vf2d ray_dir = (mouse_pos - player_pos).norm();
-		olc::vi2d intersection_pos;
+	// 	olc::vf2d ray_start_pos = player_pos;
+	// 	olc::vf2d ray_dir = (mouse_pos - player_pos).norm();
+	// 	olc::vi2d intersection_pos;
 
-		float max_distance = std::min(raycast_max_distance, (mouse_pos - player_pos).mag());
+	// 	float max_distance = std::min(raycast_max_distance, (mouse_pos - player_pos).mag());
 
-		bool raycast_hit = RaycastPixel(ray_start_pos, ray_dir, max_distance, intersection_pos);
-		if(!raycast_hit){
-			return;
-		}
+	// 	bool raycast_hit = RaycastPixel(ray_start_pos, ray_dir, max_distance, intersection_pos);
+	// 	if(!raycast_hit){
+	// 		return;
+	// 	}
 
-        int tx = intersection_pos.x;
-        int ty = intersection_pos.y;
+    //     int tx = intersection_pos.x;
+    //     int ty = intersection_pos.y;
 
-		std::map<int, int> frequency;
+	// 	std::map<int, int> frequency;
 
-        for (int x = -brush_size; x <= brush_size; x++) {
-            int x0 = x + tx;
-            for (int y = -brush_size; y <= brush_size; y++) {
-                int y0 = y + ty;
-				if (x * x + y * y >= brush_size_squared) {
-					continue;
-				}
-				int highest = 1;
-				int currentState;
-				if(!MapLocationIsEmpty(olc::vi2d{x0, y0})){
-					currentState = 1;
-				}
-				else{
-					currentState = 0;
-				}
-				int highestState = currentState;
-				frequency.clear();
-				bool tie = false;
-				int blend_range = 3;
-				for (int ox = -blend_range; ox <= blend_range; ox++) {
-					for (int oy = -blend_range; oy <= blend_range; oy++) {
-						int state;
-						if(!MapLocationIsEmpty({x0 + ox, y0 + oy})){
-							state = 1;
-						}
-						else{
-							state = 0;
-						}
-						int count = frequency[state];
-						if (count == 0) {
-							count = 1;
-						} else {
-							count++;
-						}
-						if (count > highest) {
-							highest = count;
-							highestState = state;
-							tie = false;
-						} else if (count == highest) {
-							tie = true;
-						}
-						frequency[state] = count;
-					}
-				}
-				if (!tie && currentState != highestState) {
-					buffer.set(x, y, highestState);
-				}
-            }
-        }
+    //     for (int x = -brush_size; x <= brush_size; x++) {
+    //         int x0 = x + tx;
+    //         for (int y = -brush_size; y <= brush_size; y++) {
+    //             int y0 = y + ty;
 
-        // apply the buffer to the world
-        for (int x = -brush_size; x <= brush_size; x++) {
-            int x0 = x + tx;
-            for (int y = -brush_size; y <= brush_size; y++) {
-                int y0 = y + ty;
-				if(buffer.contains(x, y)){
-					SetColourValue({x0, y0}, (float)buffer.get(x, y));
-				}
-            }
-        }
-	}
+	// 			int currentState;
+	// 			if(!MapLocationIsEmpty(olc::vi2d{x0, y0})){
+	// 				currentState = 1;
+	// 			}
+	// 			else{
+	// 				currentState = 0;
+	// 			}
+
+	// 			if (x * x + y * y >= brush_size_squared) {
+	// 				buffer.set(x, y, currentState);
+	// 				continue;
+	// 			}
+	// 			int highest = 1;
+	// 			int highestState = currentState;
+	// 			frequency.clear();
+	// 			bool tie = false;
+	// 			for (int ox = -blend_range; ox <= blend_range; ox++) {
+	// 				for (int oy = -blend_range; oy <= blend_range; oy++) {
+	// 					int state;
+	// 					if(!MapLocationIsEmpty({x0 + ox, y0 + oy})){
+	// 						state = 1;
+	// 					}
+	// 					else{
+	// 						state = 0;
+	// 					}
+	// 					int count = frequency[state];
+	// 					if (count == 0) {
+	// 						count = 1;
+	// 					} else {
+	// 						count++;
+	// 					}
+	// 					if (count > highest) {
+	// 						highest = count;
+	// 						highestState = state;
+	// 						tie = false;
+	// 					} else if (count == highest) {
+	// 						tie = true;
+	// 					}
+	// 					frequency[state] = count;
+	// 				}
+	// 			}
+	// 			if (!tie && currentState != highestState) {
+	// 				buffer.set(x, y, highestState);
+	// 			}
+    //         }
+    //     }
+
+    //     // apply the buffer to the world
+    //     for (int x = -brush_size; x <= brush_size; x++) {
+    //         int x0 = x + tx;
+    //         for (int y = -brush_size; y <= brush_size; y++) {
+    //             int y0 = y + ty;
+	// 			if(buffer.contains(x, y)){
+	// 				SetColourValue({x0, y0}, (float)buffer.get(x, y));
+	// 			}
+    //         }
+    //     }
+	// }
 
 	void AdjustTerrain_BlendBallFractional(olc::vf2d vCell, olc::vf2d direction){
 		double brush_size_squared = brush_size * brush_size;
@@ -637,7 +639,6 @@ public:
 					buffer.set(x, y, GetColourValue({x0, y0}));
 					continue;
 				}
-				int blend_range = 5;
 				float max_sum_weighted = 0.0f;
 				float colour_sum_weighted = 0.0f;
 
@@ -673,6 +674,313 @@ public:
 			}
 		}
 	}
+
+	void AdjustTerrain_BlendBallFractionalFast(){
+		std::vector<float> sums;
+	
+		olc::vf2d ray_start_pos = player_pos;
+		olc::vf2d ray_dir = (mouse_pos - player_pos).norm();
+		olc::vi2d intersection_pos;
+
+		float max_distance = std::min(raycast_max_distance, (mouse_pos - player_pos).mag());
+
+		bool raycast_hit = RaycastPixel(ray_start_pos, ray_dir, max_distance, intersection_pos);
+		if(!raycast_hit){
+			return;
+		}
+	
+		int tx = intersection_pos.x;
+		int ty = intersection_pos.y;
+	
+		int blend_range = 5;
+	
+		// for distance normalization
+		double brush_size_squared = brush_size * brush_size;
+	
+		double brush_region_half = brush_size + blend_range;
+		double brush_region_size = 2 * brush_region_half + 1;
+		double brush_region_squared = brush_region_size * brush_region_size;
+	
+		int x, y, i, dx, dy, x0, y0, xmin, xmax, ymin, ymax;
+		double distance, area;
+		float a, b, c, d, sum, average, distance_normalised, cur_voxel_value, new_voxel_value;
+	
+		// create the summed-area table for the selected region
+		// https://en.wikipedia.org/wiki/Summed-area_table
+		sums.resize(brush_region_squared, 0);
+		for (y = 0, i = 0; y < brush_region_size; ++y) {
+			dy = y - brush_region_half;
+			y0 = ty + dy;
+			for (x = 0; x < brush_region_size; ++x) {
+				dx = x - brush_region_half;
+				x0 = tx + dx;
+				/* sample the current voxel value, and add the sums to the left and top of it
+				   (minus the overlap because otherwise it is counted twice) */
+				sum = GetColourValue({x0, y0});
+				if (x > 0) sum += sums[i-1];
+				if (y > 0) sum += sums[i-brush_region_size];
+				if (x > 0 && y > 0) sum -= sums[i-(brush_region_size+1)];
+				sums[i++] = sum;
+			}
+		}
+	
+		// apply brush to region
+		for (y = 0, i = 0; y < brush_region_size; ++y) {
+			dy = y - brush_region_half;
+			y0 = ty + dy;
+			ymin = std::max(y - blend_range, 0) - 1;
+			ymax = std::min(y + blend_range, (int)(brush_region_size - 1));
+		
+			for (x = 0; x < brush_region_size; ++x) {
+				dx = x - brush_region_half;
+				x0 = tx + dx;
+				xmin = std::max(x - blend_range, 0) - 1;
+				xmax = std::min(x + blend_range, (int)(brush_region_size - 1));
+			
+				area = (xmax - xmin) * (ymax - ymin);
+			
+				/* using the summed-area table method, we only need to 
+				   sample 4 points to get the sum of the brush region */
+				a = xmin < 0 || ymin < 0 ? 0 : sums[ymin*brush_region_size+xmin];
+				b = ymin < 0 ? 0 : sums[ymin*brush_region_size+xmax];
+				c = xmin < 0 ? 0 : sums[ymax*brush_region_size+xmin];
+				d = sums[ymax*brush_region_size+xmax];
+				sum = (d + a) - (b + c);
+			
+				average = sum / area;
+				average = EaseInOutCubic(average);
+			
+				distance = dx * dx + dy * dy;
+				distance_normalised = 1.0 - (distance / brush_size_squared);
+				// distance_normalised = (distance / brush_size_squared);
+				distance_normalised = std::max(distance_normalised * 2.0 - 1.0, 0.0);
+			
+				olc::vi2d pos{x0,y0};
+			
+				cur_voxel_value = GetColourValue(pos);
+				new_voxel_value = Lerp(cur_voxel_value, average, distance_normalised);
+				// new_voxel_value = Lerp(average, cur_voxel_value, distance_normalised);
+			
+				SetColourValue(pos, new_voxel_value);
+			}
+		}
+	}
+
+	// NOTE: this pre-average method requires less and less iterations after each average
+	// TODO: analyse if code will work well with blend_range > brush_size
+	void AdjustTerrain_BlendBallFractionalFast2(){
+		int brush_size_squared = brush_size * brush_size;
+
+		// TODO: think of better variable name for this
+		int extended_brush_size = brush_size + blend_range;
+
+		// all changes are initially performed into a buffer to prevent the
+		// results bleeding into each other
+		BlockBuffer<float> buffer{{-extended_brush_size, -extended_brush_size}, {extended_brush_size, extended_brush_size}};
+
+		olc::vf2d ray_start_pos = player_pos;
+		olc::vf2d ray_dir = (mouse_pos - player_pos).norm();
+		olc::vi2d intersection_pos;
+
+		float max_distance = std::min(raycast_max_distance, (mouse_pos - player_pos).mag());
+
+		bool raycast_hit = RaycastPixel(ray_start_pos, ray_dir, max_distance, intersection_pos);
+		if(!raycast_hit){
+			return;
+		}
+
+		int brush_pos_x = intersection_pos.x;
+		int brush_pos_y = intersection_pos.y;
+
+		float total_blend_elements = 2 * blend_range + 1;
+
+		// x blur
+		for (int y = -extended_brush_size; y <= extended_brush_size; y++) {
+			int y0 = y + brush_pos_y;
+			float colour_sum = 0.0f;
+			std::queue<float> buffered_values;
+
+			for (int x = -brush_size; x <= brush_size; x++){
+				int x0 = x + brush_pos_x;
+
+				if(x == -brush_size){
+					for (int ox = -blend_range; ox <= blend_range; ox++){
+						float value = GetColourValue({x0 + ox, y0});
+						buffered_values.push(value);
+						colour_sum += value;
+					}
+				}
+				else{
+					float value = GetColourValue({x0 + blend_range, y0});
+					buffered_values.push(value);
+					colour_sum += value;
+
+					colour_sum -= buffered_values.front();
+					buffered_values.pop();
+				}
+
+				float average = colour_sum / total_blend_elements;
+				buffer.set(x, y, average);
+			}
+		}
+
+		// y blur
+		for (int x = -brush_size; x <= brush_size; x++) {
+			float colour_sum = 0.0f;
+			std::queue<float> buffered_values;
+
+			for (int y = -brush_size; y <= brush_size; y++){
+				if(y == -brush_size){
+					for (int oy = -blend_range; oy <= blend_range; oy++){
+						float value = buffer.get(x, y + oy);
+						buffered_values.push(value);
+						colour_sum += value;
+					}
+				}
+				else{
+					float value = buffer.get(x, y + blend_range);
+					buffered_values.push(value);
+					colour_sum += value;
+
+					colour_sum -= buffered_values.front();
+					buffered_values.pop();
+				}
+
+				float average = colour_sum / total_blend_elements;
+				buffer.set(x, y, average);
+			}
+		}
+
+		// processing and pasting result
+		for (int x = -brush_size; x <= brush_size; x++) {
+			int x0 = x + brush_pos_x;
+			for (int y = -brush_size; y <= brush_size; y++){
+				int y0 = y + brush_pos_y;
+
+				int distance = x * x + y * y;
+				if (distance >= brush_size_squared) {
+					continue;
+				}
+
+				float average = buffer.get(x, y);
+
+				average = EaseInOutCubic(average);
+
+				float curr_voxel_value = GetColourValue({x0, y0});
+				
+				float distance_normalised = (float)distance / (float)brush_size_squared;
+				distance_normalised = std::max(distance_normalised * 2.0f - 1.0f, 0.0f);
+				float new_voxel_value = Lerp(average, curr_voxel_value, distance_normalised);
+
+				SetColourValue({x0, y0}, new_voxel_value);
+			}
+		}
+	}
+
+	// 230 -> 35
+	/*void AdjustTerrain_BlendBallFractionalFast(olc::vf2d vCell, olc::vf2d direction){
+		double brush_size_squared = brush_size * brush_size;
+
+		// all changes are initially performed into a buffer to prevent the
+		// results bleeding into each other
+		BlockBuffer<float> buffer{{-brush_size, -brush_size}, {brush_size, brush_size}};
+
+		olc::vf2d ray_start_pos = player_pos;
+		olc::vf2d ray_dir = (mouse_pos - player_pos).norm();
+		olc::vi2d intersection_pos;
+
+		float max_distance = std::min(raycast_max_distance, (mouse_pos - player_pos).mag());
+
+		bool raycast_hit = RaycastPixel(ray_start_pos, ray_dir, max_distance, intersection_pos);
+		if(!raycast_hit){
+			return;
+		}
+
+		int tx = intersection_pos.x;
+		int ty = intersection_pos.y;
+
+		// Optimised version doesn't fully average corners, but we calculate if we need to increase brush size to accomdate this.
+		int extra_iterations = 0;
+		if(blend_range + M_PI_4 >= brush_size){
+			extra_iterations = std::ceil(blend_range + M_PI_4 - brush_size);
+		}
+
+		int adjusted_brush_size = brush_size + extra_iterations;
+		for (int x = -adjusted_brush_size; x <= adjusted_brush_size; x++) {
+			int x0 = x + tx;
+			for (int y = -adjusted_brush_size; y <= adjusted_brush_size; y++) {
+				int y0 = y + ty;
+
+				float max_sum_weighted = 0.0f;
+				float colour_sum_weighted = 0.0f;
+
+				for (int ox = -blend_range; ox <= blend_range; ox++) {
+					for (int oy = -blend_range; oy <= blend_range; oy++) {
+						olc::vi2d pos{x0 + ox, y0 + oy};
+
+						max_sum_weighted += 1;
+						colour_sum_weighted += GetColourValue(pos);
+					}
+				}
+
+				float average = colour_sum_weighted / max_sum_weighted;
+				// NOTE: When using for real thing, check if value needs to be remapped to avoid floating errors
+				average = EaseInOutCubic(average);
+
+				float curr_voxel_value = GetColourValue({x0, y0});
+				
+				float distance_normalised = distance / brush_size_squared;
+				distance_normalised = std::max(distance_normalised * 2.0f - 1.0f, 0.0f);
+				float new_voxel_value = curr_voxel_value * distance_normalised + average * (1 - distance_normalised);
+
+				buffer.set(x, y, new_voxel_value);
+			}
+		}
+
+		for (int x = -brush_size; x <= brush_size; x++) {
+			int x0 = x + tx;
+			for (int y = -brush_size; y <= brush_size; y++) {
+				int y0 = y + ty;
+				double distance = x * x + y * y;
+				if (distance >= brush_size_squared) {
+					buffer.set(x, y, GetColourValue({x0, y0}));
+					continue;
+				}
+				float max_sum_weighted = 0.0f;
+				float colour_sum_weighted = 0.0f;
+
+				for (int ox = -blend_range; ox <= blend_range; ox++) {
+					for (int oy = -blend_range; oy <= blend_range; oy++) {
+						olc::vi2d pos{x0 + ox, y0 + oy};
+
+						max_sum_weighted += 1;
+						colour_sum_weighted += GetColourValue(pos);
+					}
+				}
+
+				float average = colour_sum_weighted / max_sum_weighted;
+				// NOTE: When using for real thing, check if value needs to be remapped to avoid floating errors
+				average = EaseInOutCubic(average);
+
+				float curr_voxel_value = GetColourValue({x0, y0});
+				
+				float distance_normalised = distance / brush_size_squared;
+				distance_normalised = std::max(distance_normalised * 2.0f - 1.0f, 0.0f);
+				float new_voxel_value = curr_voxel_value * distance_normalised + average * (1 - distance_normalised);
+
+				buffer.set(x, y, new_voxel_value);
+			}
+		}
+
+		// apply the changes
+		for (int x = -brush_size; x <= brush_size; x++) {
+			int x0 = x + tx;
+			for (int y = -brush_size; y <= brush_size; y++) {
+				int y0 = y + ty;
+				SetColourValue({x0, y0}, buffer.get(x, y));
+			}
+		}
+	}*/
 
 	void DestructTerrain_CircleFull(olc::vf2d vCell, olc::vf2d direction) {
 		olc::Sprite* previous_target = GetDrawTarget();
@@ -905,6 +1213,9 @@ public:
 		return (x < 0.5) ? (4 * x * x * x) : (1 - pow(-2 * x + 2, 3) / 2);
 	}
 
+	float Lerp(float from, float to, float t) {
+		return from * (1 - t) + to * t;
+	}
 };
 
 int main()
